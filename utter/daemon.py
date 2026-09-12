@@ -1,4 +1,4 @@
-"""The daemon: owns the model, the mic, the overlay, the tray, and the state machine.
+"""The daemon: owns the model, the microphone, the tray, and the state machine.
 
 Why a daemon at all: loading the model is the single largest cost in naive dictation
 scripts -- 243 ms of the 486 ms a one-shot whisper-cli run takes. Keeping it resident
@@ -14,18 +14,15 @@ import threading
 import time
 from pathlib import Path
 
-import gi
-
-gi.require_version("Gtk", "4.0")
-
-import dbus.mainloop.glib  # noqa: E402
-from gi.repository import GLib, Gtk  # noqa: E402
+import dbus.mainloop.glib
+from gi.repository import GLib
 
 from . import asr as asr_mod  # noqa: E402
 from . import inject, text as text_mod  # noqa: E402
 from .audio import Recorder  # noqa: E402
 from .config import Config, socket_path  # noqa: E402
 from .sound import Cues  # noqa: E402
+from .stream import StreamState  # noqa: E402
 
 def _types_char(key: str) -> bool:
     from .hotkey import types_a_character
@@ -44,7 +41,6 @@ class Daemon:
         self.verbose = verbose
         self.state = IDLE
         self.recorder: Recorder | None = None
-        self.overlay = None
         self.tray = None
         self.cues = Cues(cfg.ui.sounds, cfg.ui.sound_volume)
         self.backend = asr_mod.build(cfg)
@@ -64,6 +60,14 @@ class Daemon:
         self._heard_speech = False
         self._pending_backspace = 0
         self._auto_stop = cfg.audio.auto_stop
+        self.stream = StreamState(agree=cfg.stream.agree, lag=cfg.stream.lag)
+        self._streaming = cfg.stream.enabled and cfg.output.mode == "type"
+        if self._streaming and cfg.cleanup.enabled:
+            # The cleanup pass rewrites the whole transcript, which means deleting text
+            # that was typed word by word over the last ten seconds -- by which time the
+            # caret may have moved. Live typing wins; the polish pass stands down.
+            print("utter: stream.enabled, so cleanup is disabled (it would rewrite typed text)")
+            cfg.cleanup.enabled = False
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -82,14 +86,6 @@ class Daemon:
             print(f"utter: {exc}")
             return 1
         self.log(f"model ready in {(time.monotonic() - t0) * 1000:.0f} ms")
-
-        if self.cfg.ui.overlay:
-            try:
-                from .overlay import Overlay
-
-                self.overlay = Overlay(self.cfg.ui.position, self.cfg.ui.margin)
-            except Exception as exc:  # a missing layer-shell must not be fatal
-                self.log(f"overlay unavailable: {exc}")
 
         if self.cfg.ui.tray:
             dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
@@ -337,8 +333,6 @@ class Daemon:
         self._heard_speech = False
         self._recent = []
         self.cues.play("start")
-        if self.overlay:
-            self.overlay.show()
         if self.tray:
             self.tray.set_state("recording")
         self._tick = GLib.timeout_add(TICK_MS, self._on_tick)
@@ -346,15 +340,10 @@ class Daemon:
         self._guard = GLib.timeout_add(
             int(self.cfg.audio.max_duration_secs * 1000), self._on_max_duration
         )
-        if self.overlay:
-            self.overlay.set_hint(
-                "release to insert"
-                if self.cfg.trigger.mode == "hold" and self.listener
-                else "double-tap to commit  ·  stop talking to finish"
-            )
-        if self.cfg.ui.live_text and self.overlay:
+        if self._streaming:
+            self.stream.reset()
             self._partial_timer = GLib.timeout_add(
-                self.cfg.ui.live_interval_ms, self._on_partial_tick
+                self.cfg.stream.interval_ms, self._on_partial_tick
             )
         self.log("recording")
         return GLib.SOURCE_REMOVE
@@ -372,9 +361,6 @@ class Daemon:
     def _on_tick(self) -> bool:
         if self.state != RECORDING or not self.recorder:
             return GLib.SOURCE_REMOVE
-        if self.overlay:
-            self.overlay.set_level(self._level)
-            self.overlay.set_elapsed(self.recorder.duration)
         if self._auto_stop and self._should_auto_stop():
             self.log("silence detected; committing")
             self.stop()
@@ -414,19 +400,22 @@ class Daemon:
         if self.state != RECORDING or not self.recorder:
             self._partial_timer = None
             return GLib.SOURCE_REMOVE
-        if not self._partial_busy and self.recorder.duration >= 0.6:
+        if not self._partial_busy and self.recorder.duration >= self.cfg.stream.min_audio_secs:
             self._partial_busy = True
             pcm = self.recorder.snapshot()
-            threading.Thread(target=self._partial_worker, args=(pcm,), daemon=True).start()
+            dur = self.recorder.duration
+            threading.Thread(
+                target=self._partial_worker, args=(pcm, dur), daemon=True
+            ).start()
         return GLib.SOURCE_CONTINUE
 
-    def _partial_worker(self, pcm: bytes) -> None:
+    def _partial_worker(self, pcm: bytes, duration: float) -> None:
         wav = None
         try:
             if not self.recorder:
                 return
             wav = self.recorder.write_wav(pcm)
-            guess = self.backend.transcribe(wav)
+            guess = self.backend.transcribe(wav, audio_ctx=asr_mod.audio_ctx_for(duration))
         except (asr_mod.AsrError, OSError, AttributeError):
             guess = ""
         finally:
@@ -436,12 +425,37 @@ class Daemon:
 
     def _partial_done(self, guess: str) -> bool:
         self._partial_busy = False
+        if self.state != RECORDING:
+            return GLib.SOURCE_REMOVE
         shown = text_mod.tidy(guess)
-        if shown and self.state == RECORDING and self.overlay:
-            self._partial = shown
-            self.overlay.set_text(shown, partial=True)
-            self.log(f"partial: {shown[:60]}")
+        if not shown:
+            return GLib.SOURCE_REMOVE
+        self._partial = shown
+
+        if self._streaming:
+            chunk = self.stream.offer(shown)
+            if chunk:
+                self._emit(chunk)
         return GLib.SOURCE_REMOVE
+
+    def _emit(self, chunk: str) -> None:
+        """Type a chunk that will never be revised. Append only -- never backspace.
+
+        Injection is fire-and-forget: we cannot read the target buffer back, so any
+        "delete what I typed" logic is a guess that corrupts real text the moment the
+        user moves the caret or an autocomplete fires.
+        """
+        text = text_mod.live_clean(chunk)
+        text = text_mod.apply_replacements(text, self.cfg.output.replacements)
+        if not text.strip():
+            return
+        try:
+            inject.type_text(text, self.cfg.output.type_delay_ms)
+        except inject.InjectError as exc:
+            self.log(f"could not type chunk: {exc}")
+            return
+        self._stats["last_text"] = self.stream.typed
+        self.log(f"typed: {text!r}")
 
     def _on_max_duration(self) -> bool:
         self.log("hit max_duration_secs; stopping")
@@ -464,8 +478,6 @@ class Daemon:
             return GLib.SOURCE_REMOVE
 
         self.state = WORKING
-        if self.overlay:
-            self.overlay.set_state("working")
         if self.tray:
             self.tray.set_state("working")
         threading.Thread(target=self._transcribe, args=(wav, duration), daemon=True).start()
@@ -491,8 +503,11 @@ class Daemon:
 
     def _transcribe(self, wav: Path, duration: float) -> None:
         started = time.monotonic()
+        deadline = started + 2.0
+        while self._partial_busy and time.monotonic() < deadline:
+            time.sleep(0.02)
         try:
-            raw = self.backend.transcribe(wav)
+            raw = self.backend.transcribe(wav, audio_ctx=asr_mod.audio_ctx_for(duration))
         except asr_mod.AsrError as exc:
             GLib.idle_add(self._fail, str(exc))
             return
@@ -505,6 +520,23 @@ class Daemon:
     def _deliver(self, raw: str, elapsed_ms: int) -> bool:
         body = text_mod.tidy(raw)
         body = text_mod.apply_replacements(body, self.cfg.output.replacements)
+
+        if self._streaming:
+            # Everything up to the last committed word is already in the window.
+            tail = self.stream.finish(body)
+            if tail:
+                self._emit(tail)
+            typed = self.stream.typed
+            self.stream.reset()
+            if typed:
+                self._stats["utterances"] += 1
+                self._stats["last_ms"] = elapsed_ms
+                self._stats["last_text"] = typed
+            else:
+                self.log("nothing recognised; nothing typed")
+            self._finish_ok()
+            return GLib.SOURCE_REMOVE
+
         if not body:
             self.log("empty transcript (silence or hallucination); nothing typed")
             self._reset()
@@ -521,8 +553,6 @@ class Daemon:
             threading.Thread(target=self._clean_then_type, args=(body,), daemon=True).start()
             return GLib.SOURCE_REMOVE
 
-        if self.overlay:
-            self.overlay.set_text(body, partial=False)
         self._consume_backspace()
         try:
             inject.deliver(body, self.cfg.output.mode, self.cfg.output.type_delay_ms)
@@ -531,9 +561,9 @@ class Daemon:
             return GLib.SOURCE_REMOVE
 
         if cleanup_wanted:
-            if self.overlay:
-                self.overlay.set_state("polishing")
-            threading.Thread(target=self._clean_then_replace, args=(body,), daemon=True).start()
+            threading.Thread(
+                target=self._clean_then_replace, args=(body,), daemon=True
+            ).start()
         else:
             self._finish_ok()
         return GLib.SOURCE_REMOVE
@@ -576,8 +606,6 @@ class Daemon:
         return GLib.SOURCE_REMOVE
 
     def _finish_ok(self) -> None:
-        if self.overlay:
-            self.overlay.finish("done")
         if self.tray:
             self.tray.set_state("idle")
         self.state = IDLE
@@ -585,16 +613,12 @@ class Daemon:
     def _fail(self, message: str) -> bool:
         print(f"utter: {message}", flush=True)
         self.cues.play("error")
-        if self.overlay:
-            self.overlay.finish("failed", delay_ms=1400)
         if self.tray:
             self.tray.set_state("failed")
         self.state = IDLE
         return GLib.SOURCE_REMOVE
 
     def _reset(self) -> None:
-        if self.overlay:
-            self.overlay.hide()
         if self.tray:
             self.tray.set_state("idle")
         self.state = IDLE
@@ -624,4 +648,5 @@ def send(cmd: str, timeout: float = 5.0) -> str:
 
 
 def ensure_gtk_init() -> None:
-    Gtk.init()
+    """Nothing to initialise: there is no GUI, only a GLib main loop."""
+    return None

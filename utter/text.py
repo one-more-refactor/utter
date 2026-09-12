@@ -56,6 +56,28 @@ What is the capital of France?"""
 _TAG_RE = re.compile(r"<\s*/?\s*(transcript|vocabulary)\s*>", re.IGNORECASE)
 
 
+_SENTENCE = re.compile(r"[^.!?]+[.!?]*\s*")
+
+
+def dedupe_sentences(text: str) -> str:
+    """Drop a sentence that merely repeats the one before it.
+
+    Whisper loops on trailing silence, so a recording that ends with a pause often
+    comes back with its last sentence stated twice. Nobody dictates that way.
+    """
+    parts = _SENTENCE.findall(text)
+    if len(parts) < 2:
+        return text
+    out: list[str] = []
+    for part in parts:
+        key = re.sub(r"[^a-z0-9 ]", "", part.lower()).strip()
+        prev = re.sub(r"[^a-z0-9 ]", "", out[-1].lower()).strip() if out else None
+        if key and key == prev:
+            continue
+        out.append(part)
+    return "".join(out)
+
+
 def tidy(text: str) -> str:
     """Cheap deterministic cleanup, always applied."""
     text = text.strip()
@@ -73,7 +95,31 @@ def tidy(text: str) -> str:
     # Recognisers prefix segments with a dash or bullet. Dictated text never starts
     # with one, so a leading marker is an artefact rather than something said.
     text = re.sub(r"^[-\u2013\u2014\u2022]+\s*", "", text)
+    text = dedupe_sentences(text)
     return text.strip()
+
+
+# Fillers safe to drop on their own. "like" and "so" are deliberately absent: they do
+# real work in ordinary speech, and deleting them changes meaning.
+_FILLERS = re.compile(r"(?<!\w)(um+|uh+|erm?|ehm|mm+)\b[,.]?\s*", re.IGNORECASE)
+
+# "just just get" -> "just get". Speech repeats words constantly; recognisers keep both.
+_REPEAT = re.compile(r"\b(\w+)(\s+\1\b)+", re.IGNORECASE)
+
+
+def live_clean(text: str) -> str:
+    """Cheap fixes applied to each chunk as it is typed.
+
+    This is the part of a cleanup pass that can run without rewriting text that has
+    already been inserted: it only ever removes, never reorders. The LLM pass handles
+    everything that needs the whole sentence.
+    """
+    if not text:
+        return text
+    out = _FILLERS.sub("", text)
+    out = _REPEAT.sub(r"\1", out)
+    out = re.sub(r"\s{2,}", " ", out)
+    return out
 
 
 def apply_replacements(text: str, replacements: dict[str, str]) -> str:

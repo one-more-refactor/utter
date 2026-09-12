@@ -106,8 +106,13 @@ class WhisperServerBackend:
             self.proc.kill()
         self.proc = None
 
-    def transcribe(self, wav: Path) -> str:
+    def transcribe(self, wav: Path, audio_ctx: int | None = None) -> str:
         fields = {"response_format": "text", "temperature": "0.0"}
+        # Truncating the encoder context roughly halves latency on short buffers, but
+        # it must never be shorter than the audio itself or whisper starts repeating
+        # itself. Callers pass a value derived from the buffer duration.
+        if audio_ctx:
+            fields["audio_ctx"] = str(audio_ctx)
         if self.cfg.asr.language:
             fields["language"] = self.cfg.asr.language
         if self.cfg.asr.initial_prompt:
@@ -140,7 +145,7 @@ class ParakeetCliBackend:
     def stop(self) -> None:
         return None
 
-    def transcribe(self, wav: Path) -> str:
+    def transcribe(self, wav: Path, audio_ctx: int | None = None) -> str:  # noqa: ARG002
         model = str(Path(self.cfg.asr.parakeet_model).expanduser())
         cmd = [self.cfg.asr.parakeet_cli_bin, "-m", model, "-f", str(wav), "-np"]
         if self.cfg.asr.threads:
@@ -188,3 +193,16 @@ def _maybe_json_text(payload: str) -> str:
         except json.JSONDecodeError:
             pass
     return text.strip()
+
+
+def audio_ctx_for(duration_s: float) -> int:
+    """Encoder context to request for a buffer of this length.
+
+    whisper pads every clip to 30 s, so the encoder cost is fixed unless we shorten the
+    context window. Shortening it below the audio's own span makes the model repeat
+    itself, so this scales with duration and gives up entirely past ~28 s.
+    """
+    if duration_s > 28:
+        return 0  # full context
+    ctx = -(-int(1500 * duration_s / 30) // 64) * 64  # round up to a multiple of 64
+    return max(768, min(1500, ctx))

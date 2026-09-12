@@ -1,21 +1,33 @@
 # utter
 
-Local dictation for Wayland. **Alt+Space**, talk, stop talking — the text appears in
-whatever you were typing into.
+Local dictation for Wayland that **types while you speak**. Hold a key, talk, and the
+words appear in whatever you were typing into, a beat behind your voice.
 
-The whole interface is five dots at the bottom of the screen. They appear when you
-speak and vanish when you stop. No panel, no window, no buttons.
-
-Nothing leaves your machine. There is no account, no API key, and no subscription.
-
-**Alt+Space, then talk.** When you stop talking it types what you said. No key to
-release, no key to press again.
+There is no window, no panel, no overlay. The text arriving *is* the interface.
 
 ```
 utter daemon        # keeps the model resident, arms the trigger
-utter keys --watch  # confirm the double-tap is detected
-utter toggle        # or drive it from a compositor keybind
+utter keys --watch  # confirm your trigger key is detected
 ```
+
+Nothing leaves your machine. No account, no API key, no subscription.
+
+## How it feels
+
+Measured, dictating an 11-second sentence (audio starts at t=0):
+
+```
+t+2.2s   And so,
+t+2.6s    my
+t+4.6s    fellow
+t+5.0s    Americans,
+t+7.0s    not what
+t+7.4s    your country
+t+10.6s   you, ask what you can do for
+t+11.4s   your country.
+```
+
+Words land roughly **1–2 seconds behind your voice** and are never taken back.
 
 ## Why this exists
 
@@ -33,18 +45,32 @@ because the network round-trip alone costs more than the inference:
 | Aqua Voice (cloud, fastest paid product) | ~450 ms claimed |
 | Wispr Flow (cloud) | 700 ms claimed, 1–2 s reported |
 
-## Voice mode
+## How it works
 
-The default flow has no hotkey ceremony at all:
+1. **Hold Right Ctrl** (or any key that types nothing). Read straight from the kernel's
+   input devices, so it works in every application without a compositor keybind.
+2. **Talk.** Every 400 ms the audio so far is re-recognised. Words that two consecutive
+   passes agree on get typed; the rest is held back until it stops changing.
+3. **Release.** A final pass adds whatever is still unsaid.
 
-1. **Alt+Space.** Read straight from the kernel's input devices, so it works in any
-   application without a compositor keybind, and inserts no character of its own.
-2. **Talk.** Five dots at the bottom edge rise and fall with your voice, so you can
-   see it is hearing you, and fade out whenever you are quiet. They turn amber while
-   transcribing. That is the entire UI.
-3. **Stop talking.** After 1.5 s of silence it inserts the text on its own.
+**Text is only ever appended, never rewritten.** Injection is fire-and-forget — a tool
+cannot read back the window it typed into, so "delete the last 17 characters" is a
+guess that corrupts real text the moment you move the caret or an autocomplete fires.
+Instead, a word is typed only once it has stopped changing.
 
-Alt+Space again to commit early. `utter cancel` throws the recording away.
+That policy is LocalAgreement-2 from [Macháček et al.](https://arxiv.org/abs/2307.14743),
+plus two words of deliberate lag — measured as the point where whisper stops committing
+the punctuation it invents at the edge of a partial.
+
+### Why hold a key that types nothing
+
+The trigger is a *passive* read of the keyboard, not a grab, so the key still reaches
+your application. Holding Space would autorepeat spaces into your document at the
+compositor's repeat rate, and the count cannot be derived reliably. Alt+Space is no
+better — measured, it inserted 2 characters out of 5 presses.
+
+So hold mode wants an inert key: `RIGHTCTRL`, `SCROLLLOCK`, `PAUSE`, `MENU`, `F13`.
+Prefer a chord you tap instead? `mode = "chord"` with `modifiers = ["ALT"]`.
 
 ### Other triggers
 

@@ -93,11 +93,11 @@ class TriggerConfig:
     #               and types no character of its own.
     # "double_tap": tap the key twice to start, again to commit (or stop talking).
     # "hold":       hold the key to talk, release to commit -- classic push-to-talk.
-    mode: str = "chord"
+    mode: str = "hold"
     modifiers: list[str] = field(default_factory=lambda: ["ALT"])
     # The key. Name from KEY_CODES, or a raw keycode.
     # For "hold", prefer a key that types nothing: SCROLLLOCK, PAUSE, F13, MENU.
-    key: str = "SPACE"
+    key: str = "RIGHTCTRL"
     double_tap_ms: int = 320
     # Ignore taps that happen while you are actively typing: another key pressed within
     # this window before the first tap cancels it.
@@ -111,6 +111,23 @@ class TriggerConfig:
     backspace: int = 2
     # Double-tap again while dictating to commit early.
     tap_to_commit: bool = True
+
+
+@dataclass
+class StreamConfig:
+    """Type words into the focused window while you are still speaking."""
+
+    enabled: bool = True
+    # How often to re-recognise the audio so far. The recogniser takes ~110 ms on a
+    # short buffer, so 400 ms leaves headroom and keeps the commit lag low.
+    interval_ms: int = 400
+    # Consecutive passes that must agree before a word is typed (LocalAgreement-2).
+    agree: int = 2
+    # Settled words held back anyway. The trailing edge of a partial carries whisper's
+    # invented punctuation; 2 is where that stops being committed.
+    lag: int = 2
+    # Do not start recognising until there is at least this much audio.
+    min_audio_secs: float = 0.6
 
 
 @dataclass
@@ -128,17 +145,10 @@ class OutputConfig:
 
 @dataclass
 class UiConfig:
-    overlay: bool = True
+    # There is no on-screen UI. The words appearing as you speak are the feedback,
+    # and a sound tells you the microphone opened. A tray icon shows state at a glance.
     tray: bool = True
     sounds: bool = True
-    # Re-recognise the audio so far while you speak. Off by default: the pill shows
-    # that it is listening, which is the part you actually need to see.
-    live_text: bool = False
-    # How often to refresh that partial transcript.
-    live_interval_ms: int = 700
-    # Overlay position: "bottom", "top", "bottom-right", "top-right".
-    position: str = "bottom"
-    margin: int = 22
     sound_volume: float = 0.25
 
 
@@ -146,6 +156,7 @@ class UiConfig:
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     trigger: TriggerConfig = field(default_factory=TriggerConfig)
+    stream: StreamConfig = field(default_factory=StreamConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     output: OutputConfig = field(default_factory=OutputConfig)

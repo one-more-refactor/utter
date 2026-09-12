@@ -11,27 +11,33 @@ from pathlib import Path
 from .config import CONFIG_PATH, Config, socket_path
 
 EXAMPLE_CONFIG = """# utter -- everything here is already the default.
-# Delete what you do not change.
+# Delete anything you do not change.
 
 [trigger]
-modifiers = ["ALT"]    # Alt+Space to start, Alt+Space again to insert
-key = "SPACE"
-# mode = "hold"        # or hold a key -- then use an inert one:
-# key = "SCROLLLOCK"   # SCROLLLOCK, PAUSE, F13, MENU
+mode = "hold"          # hold the key to talk, release to insert
+key = "RIGHTCTRL"      # must be a key that types nothing:
+                       # RIGHTCTRL, SCROLLLOCK, PAUSE, MENU, F13
+# mode = "chord"       # or a combination you press once, and again to finish
+# modifiers = ["ALT"]
+# key = "SPACE"
 
-[audio]
-silence_ms = 1500      # pause this long and it inserts what you said
+[stream]
+enabled = true         # type words into the window while you speak
+interval_ms = 400      # how often to re-recognise what you have said so far
+lag = 2                # words held back until they stop changing
 
 [asr]
 language = "en"
 model = "~/ai/stt/ggml-large-v3-turbo-q8_0.bin"
 
 [output]
-mode = "type"          # or "clipboard"
+mode = "type"
+
+[output.replacements]
+# "cloud code" = "Claude Code"
 
 [ui]
-sounds = true
-position = "bottom"    # bottom | top | bottom-right | top-right
+sounds = true          # there is no on-screen UI; the sound is the cue
 """
 
 
@@ -76,10 +82,6 @@ def main(argv: list[str] | None = None) -> int:
         return _keys(cfg, watch=getattr(args, "watch", False))
 
     if cmd == "daemon":
-        # Must happen before anything imports Gtk.
-        from ._layershell import preload
-
-        preload()
         from .daemon import Daemon, ensure_gtk_init
 
         ensure_gtk_init()
@@ -130,7 +132,7 @@ def _check(cfg: Config) -> int:
     else:
         print("trigger      disabled")
     print(f"auto-stop    {'on, ' + str(cfg.audio.silence_ms) + ' ms of silence' if cfg.audio.auto_stop else 'off'}")
-    print(f"live text    {'on' if cfg.ui.live_text else 'off'}")
+    print(f"live typing  {'on, every ' + str(cfg.stream.interval_ms) + ' ms' if cfg.stream.enabled else 'off'}")
 
     source = _default_source()
     print(f"mic          {source}")
