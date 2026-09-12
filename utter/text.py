@@ -70,6 +70,9 @@ def tidy(text: str) -> str:
     text = re.sub(r"[ \t]{2,}", " ", text)
     # Recognisers also like to leave a space before closing punctuation.
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    # Recognisers prefix segments with a dash or bullet. Dictated text never starts
+    # with one, so a leading marker is an artefact rather than something said.
+    text = re.sub(r"^[-\u2013\u2014\u2022]+\s*", "", text)
     return text.strip()
 
 

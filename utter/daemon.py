@@ -27,8 +27,15 @@ from .audio import Recorder  # noqa: E402
 from .config import Config, socket_path  # noqa: E402
 from .sound import Cues  # noqa: E402
 
+def _types_char(key: str) -> bool:
+    from .hotkey import types_a_character
+
+    return types_a_character(key)
+
+
 IDLE, RECORDING, WORKING = "idle", "recording", "working"
 TICK_MS = 60
+SMOOTH_CHUNKS = 6  # ~380 ms of 64 ms chunks
 
 
 class Daemon:
@@ -42,12 +49,21 @@ class Daemon:
         self.cues = Cues(cfg.ui.sounds, cfg.ui.sound_volume)
         self.backend = asr_mod.build(cfg)
         self._level = 0.0
+        self._recent: list[float] = []
         self._tick: int | None = None
         self._guard: int | None = None
         self._sock: socket.socket | None = None
         self._sock_ino: int | None = None
         self._loop = GLib.MainLoop()
         self._stats = {"utterances": 0, "last_ms": 0, "last_text": ""}
+        self.listener = None
+        self._partial = ""
+        self._partial_busy = False
+        self._partial_timer: int | None = None
+        self._silence_since: float | None = None
+        self._heard_speech = False
+        self._pending_backspace = 0
+        self._auto_stop = cfg.audio.auto_stop
 
     # -- lifecycle -------------------------------------------------------------
 
@@ -89,6 +105,9 @@ class Daemon:
             except Exception as exc:
                 self.log(f"tray unavailable: {exc}")
 
+        if self.cfg.trigger.enabled:
+            self._arm_trigger()
+
         try:
             self._serve()
         except (RuntimeError, OSError) as exc:
@@ -107,6 +126,44 @@ class Daemon:
             self.cleanup()
         return 0
 
+    def _arm_trigger(self) -> None:
+        tc = self.cfg.trigger
+        from .hotkey import DoubleTapListener, HoldListener, types_a_character
+
+        if tc.mode == "hold":
+            self.listener = HoldListener(
+                key=tc.key,
+                hold_ms=tc.hold_ms,
+                on_press=lambda: GLib.idle_add(self._on_hold_press),
+                on_release=lambda _held: GLib.idle_add(self._on_hold_release),
+            )
+            shape = f"hold {tc.key} ({tc.hold_ms} ms to arm)"
+        else:
+            self.listener = DoubleTapListener(
+                key=tc.key,
+                window_ms=tc.double_tap_ms,
+                on_trigger=lambda: GLib.idle_add(self._on_trigger),
+            )
+            shape = f"double-tap {tc.key} (within {tc.double_tap_ms} ms)"
+
+        if not self.listener.start():
+            print(f"utter: trigger disabled - {self.listener.error}")
+            self.listener = None
+            return
+
+        names = ", ".join(sorted({n for _p, n in self.listener.devices}))
+        self.log(f"{shape} armed on: {names}")
+
+        # Holding a key that types something inserts that character repeatedly while
+        # held -- the compositor's autorepeat, which we cannot count reliably. Say so
+        # rather than silently mangling the text.
+        if tc.mode == "hold" and types_a_character(tc.key):
+            print(
+                f"utter: warning - holding {tc.key} types characters into the focused "
+                f"window while held. Use an inert key (SCROLLLOCK, PAUSE, F13, MENU) "
+                f"for hold mode, or mode = \"double_tap\" for {tc.key}."
+            )
+
     def _warm_cleanup(self) -> None:
         t0 = time.monotonic()
         ok = text_mod.warm(self.cfg)
@@ -116,6 +173,8 @@ class Daemon:
             self.log("cleanup model could not be preloaded; is the runner up?")
 
     def cleanup(self) -> None:
+        if self.listener:
+            self.listener.stop()
         if self.recorder and self.recorder.running:
             self.recorder.stop()
         self.backend.stop()
@@ -204,6 +263,35 @@ class Daemon:
 
     # -- state machine ---------------------------------------------------------
 
+    def _on_trigger(self) -> bool:
+        """Double-tap fired. Start dictating, or commit if already listening."""
+        if self.state == RECORDING:
+            if self.cfg.trigger.tap_to_commit:
+                # The two trigger keystrokes landed in the target window as well.
+                self._pending_backspace += self.cfg.trigger.backspace
+                self.stop()
+        elif self.state == IDLE:
+            self._pending_backspace = self.cfg.trigger.backspace
+            self.start()
+        return GLib.SOURCE_REMOVE
+
+    def _on_hold_press(self) -> bool:
+        """Key held past the threshold: open the microphone."""
+        if self.state == IDLE:
+            # In hold mode the release is the stop signal, so silence must not commit
+            # early -- the speaker may simply be pausing while still holding the key.
+            self._pending_backspace = (
+                self.cfg.trigger.backspace if _types_char(self.cfg.trigger.key) else 0
+            )
+            self.start(auto_stop=False)
+        return GLib.SOURCE_REMOVE
+
+    def _on_hold_release(self) -> bool:
+        """Key released: commit what was said."""
+        if self.state == RECORDING:
+            self.stop()
+        return GLib.SOURCE_REMOVE
+
     def toggle(self) -> bool:
         if self.state == RECORDING:
             self.stop()
@@ -211,9 +299,10 @@ class Daemon:
             self.start()
         return GLib.SOURCE_REMOVE
 
-    def start(self) -> bool:
+    def start(self, auto_stop: bool | None = None) -> bool:
         if self.state != IDLE:
             return GLib.SOURCE_REMOVE
+        self._auto_stop = self.cfg.audio.auto_stop if auto_stop is None else auto_stop
         self.recorder = Recorder(
             source=self.cfg.audio.source,
             rate=self.cfg.audio.rate,
@@ -225,6 +314,10 @@ class Daemon:
             return GLib.SOURCE_REMOVE
 
         self.state = RECORDING
+        self._partial = ""
+        self._silence_since = None
+        self._heard_speech = False
+        self._recent = []
         self.cues.play("start")
         if self.overlay:
             self.overlay.show()
@@ -235,11 +328,28 @@ class Daemon:
         self._guard = GLib.timeout_add(
             int(self.cfg.audio.max_duration_secs * 1000), self._on_max_duration
         )
+        if self.overlay:
+            self.overlay.set_hint(
+                "release to insert"
+                if self.cfg.trigger.mode == "hold" and self.listener
+                else "double-tap to commit  ·  stop talking to finish"
+            )
+        if self.cfg.ui.live_text and self.overlay:
+            self._partial_timer = GLib.timeout_add(
+                self.cfg.ui.live_interval_ms, self._on_partial_tick
+            )
         self.log("recording")
         return GLib.SOURCE_REMOVE
 
     def _note_level(self, level: float) -> None:
-        self._level = level  # read by the GTK tick; never touch widgets off-thread
+        # Read by the GTK tick; never touch widgets off-thread.
+        self._level = level
+        # Keep a short history so silence detection looks at a window rather than one
+        # 64 ms chunk. Consonants and breaths dip low constantly; an utterance has not
+        # ended until the whole window is quiet.
+        self._recent.append(level)
+        if len(self._recent) > SMOOTH_CHUNKS:
+            del self._recent[:-SMOOTH_CHUNKS]
 
     def _on_tick(self) -> bool:
         if self.state != RECORDING or not self.recorder:
@@ -247,7 +357,73 @@ class Daemon:
         if self.overlay:
             self.overlay.set_level(self._level)
             self.overlay.set_elapsed(self.recorder.duration)
+        if self._auto_stop and self._should_auto_stop():
+            self.log("silence detected; committing")
+            self.stop()
+            return GLib.SOURCE_REMOVE
         return GLib.SOURCE_CONTINUE
+
+    def _should_auto_stop(self) -> bool:
+        """True once the speaker has clearly stopped talking.
+
+        Requires speech to have been heard first, so opening the mic and thinking for a
+        moment does not instantly commit an empty recording.
+        """
+        ac = self.cfg.audio
+        if not self.recorder:
+            return False
+        if self.recorder.duration * 1000 < ac.min_speech_ms:
+            return False
+        now = time.monotonic()
+        window_peak = max(self._recent) if self._recent else 0.0
+        if window_peak >= ac.silence_level:
+            self._heard_speech = True
+            self._silence_since = None
+            return False
+        if not self._heard_speech:
+            return False
+        if self._silence_since is None:
+            self._silence_since = now
+            return False
+        return (now - self._silence_since) * 1000 >= ac.silence_ms
+
+    def _on_partial_tick(self) -> bool:
+        """Re-recognise everything captured so far, so words appear while speaking.
+
+        Cheap because the model is resident: a full 11 s utterance costs ~200 ms. Only
+        one partial is ever in flight, so a slow pass just skips a beat.
+        """
+        if self.state != RECORDING or not self.recorder:
+            self._partial_timer = None
+            return GLib.SOURCE_REMOVE
+        if not self._partial_busy and self.recorder.duration >= 0.6:
+            self._partial_busy = True
+            pcm = self.recorder.snapshot()
+            threading.Thread(target=self._partial_worker, args=(pcm,), daemon=True).start()
+        return GLib.SOURCE_CONTINUE
+
+    def _partial_worker(self, pcm: bytes) -> None:
+        wav = None
+        try:
+            if not self.recorder:
+                return
+            wav = self.recorder.write_wav(pcm)
+            guess = self.backend.transcribe(wav)
+        except (asr_mod.AsrError, OSError, AttributeError):
+            guess = ""
+        finally:
+            if wav is not None:
+                wav.unlink(missing_ok=True)
+            GLib.idle_add(self._partial_done, guess)
+
+    def _partial_done(self, guess: str) -> bool:
+        self._partial_busy = False
+        shown = text_mod.tidy(guess)
+        if shown and self.state == RECORDING and self.overlay:
+            self._partial = shown
+            self.overlay.set_text(shown, partial=True)
+            self.log(f"partial: {shown[:60]}")
+        return GLib.SOURCE_REMOVE
 
     def _on_max_duration(self) -> bool:
         self.log("hit max_duration_secs; stopping")
@@ -287,7 +463,7 @@ class Daemon:
         return GLib.SOURCE_REMOVE
 
     def _clear_timers(self) -> None:
-        for attr in ("_tick", "_guard"):
+        for attr in ("_tick", "_guard", "_partial_timer"):
             handle = getattr(self, attr)
             if handle is not None:
                 GLib.source_remove(handle)
@@ -327,6 +503,9 @@ class Daemon:
             threading.Thread(target=self._clean_then_type, args=(body,), daemon=True).start()
             return GLib.SOURCE_REMOVE
 
+        if self.overlay:
+            self.overlay.set_text(body, partial=False)
+        self._consume_backspace()
         try:
             inject.deliver(body, self.cfg.output.mode, self.cfg.output.type_delay_ms)
         except inject.InjectError as exc:
@@ -335,17 +514,27 @@ class Daemon:
 
         if cleanup_wanted:
             if self.overlay:
-                self.overlay.set_note("polishing")
+                self.overlay.set_state("polishing")
             threading.Thread(target=self._clean_then_replace, args=(body,), daemon=True).start()
         else:
             self._finish_ok()
         return GLib.SOURCE_REMOVE
+
+    def _consume_backspace(self) -> None:
+        """Delete the trigger keystrokes that reached the focused window."""
+        count, self._pending_backspace = self._pending_backspace, 0
+        if count and self.cfg.output.mode == "type":
+            try:
+                inject.backspace(count)
+            except inject.InjectError:
+                pass
 
     def _clean_then_type(self, body: str) -> None:
         cleaned = text_mod.clean_with_llm(body, self.cfg)
         GLib.idle_add(self._type_final, cleaned)
 
     def _type_final(self, cleaned: str) -> bool:
+        self._consume_backspace()
         try:
             inject.deliver(cleaned, self.cfg.output.mode, self.cfg.output.type_delay_ms)
         except inject.InjectError as exc:

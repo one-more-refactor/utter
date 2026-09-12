@@ -35,6 +35,15 @@ class AudioConfig:
     max_duration_secs: float = 60.0
     # Drop recordings shorter than this -- almost always an accidental double-tap.
     min_duration_secs: float = 0.35
+    # Stop on your own silence, so dictation ends by itself. This is what makes it feel
+    # like a voice mode rather than a recorder you have to switch off.
+    auto_stop: bool = True
+    # Peak level (0.0-1.0) below which audio counts as silence.
+    silence_level: float = 0.02
+    # How long that silence must last before committing.
+    silence_ms: int = 1500
+    # Never auto-stop before this much audio exists, so a slow start is not cut off.
+    min_speech_ms: int = 500
 
 
 @dataclass
@@ -76,6 +85,28 @@ class CleanupConfig:
 
 
 @dataclass
+class TriggerConfig:
+    """Global key trigger, read straight from evdev -- see hotkey.py."""
+
+    enabled: bool = True
+    # "double_tap": tap the key twice to start, again to commit (or stop talking).
+    # "hold":       hold the key to talk, release to commit -- classic push-to-talk.
+    mode: str = "double_tap"
+    # The key. Name from KEY_CODES, or a raw keycode.
+    # For "hold", prefer a key that types nothing: SCROLLLOCK, PAUSE, F13, MENU.
+    key: str = "SPACE"
+    double_tap_ms: int = 320
+    # How long the key must be held before the microphone opens, in "hold" mode. Stops
+    # an accidental brush from starting a dictation.
+    hold_ms: int = 220
+    # The trigger keys still reach the focused window (this is a passive read, not a
+    # grab), so two stray spaces get typed. Delete them before inserting the transcript.
+    backspace: int = 2
+    # Double-tap again while dictating to commit early.
+    tap_to_commit: bool = True
+
+
+@dataclass
 class OutputConfig:
     # "type" synthesises keystrokes via wtype. "clipboard" copies and leaves pasting to you.
     mode: str = "type"
@@ -93,6 +124,10 @@ class UiConfig:
     overlay: bool = True
     tray: bool = True
     sounds: bool = True
+    # Show words in the overlay as you speak, by re-recognising the audio so far.
+    live_text: bool = True
+    # How often to refresh that partial transcript.
+    live_interval_ms: int = 700
     # Overlay position: "bottom", "top", "bottom-right", "top-right".
     position: str = "bottom"
     margin: int = 90
@@ -102,6 +137,7 @@ class UiConfig:
 @dataclass
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
+    trigger: TriggerConfig = field(default_factory=TriggerConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
     cleanup: CleanupConfig = field(default_factory=CleanupConfig)
     output: OutputConfig = field(default_factory=OutputConfig)

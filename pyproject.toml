@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "utter"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local push-to-talk dictation for Wayland, with an overlay, tray and sound cues"
 readme = "README.md"
 requires-python = ">=3.11"

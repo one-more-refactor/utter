@@ -16,6 +16,15 @@ EXAMPLE_CONFIG = """# utter configuration
 [audio]
 source = "default"            # never point this at a *.monitor node
 max_duration_secs = 60.0      # hard stop, so a missed stop cannot run for minutes
+auto_stop = true              # commit when you stop talking
+silence_ms = 1500             # how long a pause must last to count as "done"
+silence_level = 0.02          # peak level below which audio counts as silence
+
+[trigger]
+enabled = true                # double-tap to dictate, read straight from evdev
+key = "SPACE"
+double_tap_ms = 320
+backspace = 2                 # delete the two spaces the trigger itself types
 
 [asr]
 backend = "whisper-server"    # resident, ~220 ms/utterance
@@ -43,6 +52,8 @@ vocabulary = []               # ["Authentik", "Proxmox", "niri"]
 overlay = true
 tray = true
 sounds = true
+live_text = true              # show words in the overlay as you speak
+live_interval_ms = 700
 position = "bottom"           # bottom | top | bottom-right | top-right
 """
 
@@ -67,6 +78,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("check", help="verify models, binaries and audio setup")
     sub.add_parser("init", help="write an example config file")
     sub.add_parser("sources", help="list usable microphone sources")
+    k = sub.add_parser("keys", help="show which keyboards the trigger can read")
+    k.add_argument("--watch", action="store_true", help="print each double-tap as it fires")
 
     args = parser.parse_args(argv)
     cmd = args.cmd or "daemon"
@@ -81,6 +94,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if cmd == "sources":
         return _sources()
+
+    if cmd == "keys":
+        return _keys(cfg, watch=getattr(args, "watch", False))
 
     if cmd == "daemon":
         # Must happen before anything imports Gtk.
@@ -123,6 +139,21 @@ def _check(cfg: Config) -> int:
     print(f"output       {cfg.output.mode} (wtype delay {cfg.output.type_delay_ms} ms)")
     print(f"cleanup      {'on, ' + cfg.cleanup.model if cfg.cleanup.enabled else 'off'}")
     print(f"socket       {socket_path()}")
+    if cfg.trigger.enabled:
+        from .hotkey import keyboards, resolve_key
+
+        code = resolve_key(cfg.trigger.key)
+        found = keyboards(code) if code is not None else []
+        print(f"trigger      double-tap {cfg.trigger.key} "
+              f"({len(found)} readable keyboard(s))")
+        if not found:
+            problems.append(
+                "no readable keyboard for the trigger; run `utter keys`"
+            )
+    else:
+        print("trigger      disabled")
+    print(f"auto-stop    {'on, ' + str(cfg.audio.silence_ms) + ' ms of silence' if cfg.audio.auto_stop else 'off'}")
+    print(f"live text    {'on' if cfg.ui.live_text else 'off'}")
 
     source = _default_source()
     print(f"mic          {source}")
@@ -142,6 +173,54 @@ def _check(cfg: Config) -> int:
         return 1
     print("\nall good.")
     return 0
+
+
+def _keys(cfg, watch: bool = False) -> int:
+    from .hotkey import DoubleTapListener, keyboards, resolve_key
+
+    code = resolve_key(cfg.trigger.key)
+    if code is None:
+        print(f"utter: unknown trigger key {cfg.trigger.key!r}")
+        return 1
+    devices = keyboards(code)
+    print(f"trigger      double-tap {cfg.trigger.key} (keycode {code}) "
+          f"within {cfg.trigger.double_tap_ms} ms")
+    if not devices:
+        print("readable     none")
+        print("\nproblem      no readable keyboard. Add yourself to the 'input' group:")
+        print("               sudo usermod -aG input $USER   (then log out and back in)")
+        return 1
+    for path, name in devices:
+        print(f"readable     {path:22} {name}")
+
+    if not watch:
+        print("\nrun `utter keys --watch` and double-tap to confirm it fires.")
+        return 0
+
+    import time
+
+    hits = []
+    listener = DoubleTapListener(
+        cfg.trigger.key, cfg.trigger.double_tap_ms, on_trigger=lambda: hits.append(time.time())
+    )
+    if not listener.start():
+        print(f"utter: {listener.error}")
+        return 1
+    print("\nwatching for 20 s -- double-tap now (Ctrl+C to stop)")
+    seen = 0
+    try:
+        deadline = time.time() + 20
+        while time.time() < deadline:
+            time.sleep(0.1)
+            while seen < len(hits):
+                seen += 1
+                print(f"  double-tap #{seen} detected")
+    except KeyboardInterrupt:
+        pass
+    finally:
+        listener.stop()
+    print(f"\n{seen} double-tap(s) detected.")
+    return 0 if seen else 1
 
 
 def _sources() -> int:

@@ -93,6 +93,26 @@ class Recorder:
             if self.on_level:
                 self.on_level(_peak(chunk))
 
+    def snapshot(self) -> bytes:
+        """Copy the audio captured so far, without interrupting capture.
+
+        This is what makes live partial transcription possible: the recogniser gets a
+        complete WAV of everything said up to now while the microphone keeps running.
+        """
+        with self._lock:
+            return bytes(self._buf)
+
+    def write_wav(self, pcm: bytes) -> Path:
+        fd = tempfile.NamedTemporaryFile(prefix="utter-part-", suffix=".wav", delete=False)
+        path = Path(fd.name)
+        fd.close()
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)
+            wav.setframerate(self.rate)
+            wav.writeframes(pcm)
+        return path
+
     def stop(self) -> bytes:
         """Stop capture and return the raw PCM collected."""
         self._running = False

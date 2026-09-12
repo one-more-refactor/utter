@@ -1,14 +1,20 @@
 # utter
 
-Local push-to-talk dictation for Wayland. Hold a key, talk, and the text appears in
-whatever you were typing into — with an on-screen meter, a tray indicator, and sound
-cues so you know capture actually opened.
+Local push-to-talk dictation for Wayland. Double-tap space — or hold a key — talk, and
+the text appears in whatever you were typing into, with a live meter, the words
+arriving as you speak, a tray indicator, and sound cues so you know the microphone
+actually opened.
 
 Nothing leaves your machine. There is no account, no API key, and no subscription.
 
+**Double-tap space and start talking.** Words appear in the overlay as you speak, and
+when you stop talking it types the finished text for you. No key to release, no key to
+press again.
+
 ```
-utter daemon        # keeps the model resident
-utter toggle        # bind this to a key
+utter daemon        # keeps the model resident, arms the trigger
+utter keys --watch  # confirm the double-tap is detected
+utter toggle        # or drive it from a compositor keybind
 ```
 
 ## Why this exists
@@ -27,6 +33,63 @@ because the network round-trip alone costs more than the inference:
 | Aqua Voice (cloud, fastest paid product) | ~450 ms claimed |
 | Wispr Flow (cloud) | 700 ms claimed, 1–2 s reported |
 
+## Voice mode
+
+The default flow has no hotkey ceremony at all:
+
+1. **Double-tap space.** Read straight from the kernel's input devices, so it works in
+   any application without a compositor keybind.
+2. **Talk.** A panel shows a live level meter and the transcript so far, refreshed
+   every 700 ms by re-recognising the audio captured up to that point. Cheap, because
+   the model is resident — a full 11 s utterance costs ~200 ms.
+3. **Stop talking.** After 1.5 s of silence it commits on its own, deletes the two
+   spaces the double-tap typed, and inserts the text.
+
+Double-tap again mid-sentence to commit early. `utter cancel` throws the recording away.
+
+### Or hold a key instead
+
+```toml
+[trigger]
+mode = "hold"
+key = "SCROLLLOCK"      # hold to talk, release to insert
+hold_ms = 220           # ignore an accidental brush
+```
+
+Hold mode is classic push-to-talk: the microphone opens while the key is down and
+commits the moment you let go, so silence detection is switched off — pausing
+mid-sentence while still holding the key is not the end of your dictation.
+
+**Pick an inert key for this.** The trigger is a passive read, so the key still reaches
+your application: holding a key that types something inserts that character over and
+over while held, at the compositor's autorepeat rate. Deleting those would mean
+guessing that rate, and guessing one too many eats your actual text — so utter does not
+try. It warns instead.
+
+| | double-tap | hold |
+|---|---|---|
+| best key | `SPACE` | `SCROLLLOCK`, `PAUSE`, `F13`, `MENU` |
+| how it ends | silence, or a second double-tap | you release the key |
+| stray characters | 2 spaces, deleted automatically | none, on an inert key |
+| `SPACE` in this mode | ideal | warned against — ~35 spaces per 2 s hold |
+
+Observed end to end, speaking an 11 s sentence: partials at `and` → `And so my` →
+`And so, my fellow Americans,` → … and a final commit 196 ms after silence was
+detected.
+
+Two details that make this possible rather than fiddly:
+
+- The trigger is a **passive read, not a grab** — your keystrokes still reach the
+  application, which is why the two stray spaces need deleting afterwards. Grabbing the
+  keyboard would avoid that but would mean intercepting every keystroke on the system.
+- **Synthesised keystrokes are invisible to it.** `wtype` uses the Wayland
+  virtual-keyboard protocol rather than creating a kernel device, so utter typing its
+  own output can never retrigger itself. No echo suppression needed.
+
+Silence detection looks at a ~380 ms window rather than a single audio chunk. Without
+that it cuts people off mid-sentence: the first version committed after 3.4 s because it
+mistook a dramatic pause for the end of the sentence.
+
 ## Measured
 
 On one machine — Ryzen 7 7700X, Radeon RX 9070 XT (gfx1201), RADV Vulkan,
@@ -40,6 +103,7 @@ whisper.cpp 1.9.3, `large-v3-turbo` q8:
 | same model, CPU only (16 threads) | 4.39 s |
 | Parakeet 0.6B via `parakeet-cli` | 691–1068 ms (reloads the model each time) |
 | optional LLM cleanup pass, warm | 482–924 ms |
+| live partial refresh, while speaking | ~200 ms per pass, every 700 ms |
 
 GPU returns to idle clocks with VRAM released between utterances.
 
@@ -78,9 +142,18 @@ curl -L -o ggml-parakeet-v3-q8.bin \
 ```sh
 git clone https://github.com/one-more-refactor/utter && cd utter
 pip install --user .
-utter init      # writes ~/.config/utter/config.toml
-utter check     # verifies models, binaries, and that your mic is not a monitor
-utter sources   # lists capture devices that actually work as a target
+utter init          # writes ~/.config/utter/config.toml
+utter check         # verifies models, binaries, mic, and the trigger
+utter sources       # lists capture devices that actually work as a target
+utter keys --watch  # confirm the trigger fires on your keyboard
+```
+
+Reading input devices normally needs the `input` group, but systemd-logind usually
+grants the active seat's user an ACL on local keyboards, so the trigger often works
+with no setup at all. If `utter keys` finds nothing:
+
+```sh
+sudo usermod -aG input $USER   # then log out and back in
 ```
 
 Then run the daemon, and bind a key. For niri, in `binds { }`:
@@ -120,10 +193,22 @@ model = "huihui_ai/gemma-4-abliterated:e4b"
 intensity = "light"                 # off | light | heavy
 vocabulary = ["Authentik", "Proxmox", "niri"]
 
+[trigger]
+enabled = true
+key = "SPACE"                       # or SCROLLLOCK, F13, CAPSLOCK, a raw keycode...
+double_tap_ms = 320
+backspace = 2
+
+[audio]
+auto_stop = true
+silence_ms = 1500
+silence_level = 0.02
+
 [ui]
 overlay = true
 tray = true
 sounds = true
+live_text = true
 ```
 
 ## The optional cleanup pass
@@ -178,11 +263,12 @@ Things that are the way they are on purpose:
 - **`max_duration_secs` is a hard stop.** A missed toggle otherwise becomes a
   multi-minute recording of near-silence, which recognisers hallucinate over
   cheerfully — `[BLANK_AUDIO]`, or "Thank you. Thank you." Those are filtered out.
-- **Toggle, not hold-to-talk.** niri fires keybinds on press only; there is no release
-  event available to config. True hold-to-talk needs an evdev grab and `input` group
-  membership, which is a bigger ask than this is worth. Use a single modifier, too: if
-  you hold a chord while text is being typed, the still-held modifier combines with
-  every character and fires compositor shortcuts instead.
+- **Double-tap, not hold-to-talk.** niri fires keybinds on press only; there is no
+  release event available to config, so hold-to-talk is not possible through a keybind
+  at all. Reading evdev directly sidesteps the compositor entirely and gives a trigger
+  that works everywhere. If you do bind a compositor key instead, use a single
+  modifier: holding a chord while text is being typed combines the held modifier with
+  every character and fires compositor shortcuts instead of inserting text.
 
 ## Limitations
 
@@ -195,6 +281,13 @@ Things that are the way they are on purpose:
   else. The PulseAudio-style names from `pactl` work only when they happen to match.
   Run `utter sources`.
 - Tested on exactly one machine, one compositor, one GPU.
+- The double-tap trigger's logic is unit-tested, and the keyboards are confirmed
+  readable, but a uinput device cannot be used to test it end-to-end (uinput nodes get
+  no seat ACL), so the final link — a human actually tapping space twice — is verified
+  by `utter keys --watch` rather than automatically.
+- Live partials re-recognise the whole utterance each pass. That is fine at
+  conversational lengths and wasteful for very long ones; `live_text = false` turns it
+  off.
 
 ## License
 
