@@ -1,0 +1,16 @@
+[Unit]
+Description=utter dictation daemon
+Documentation=https://github.com/one-more-refactor/utter
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/utter daemon
+Restart=on-failure
+RestartSec=2
+# The model stays resident; this is the whole point of the daemon.
+Slice=app.slice
+
+[Install]
+WantedBy=graphical-session.target

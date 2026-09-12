@@ -1,0 +1,14 @@
+// Add these inside the `binds { ... }` block of ~/.config/niri/config.kdl
+//
+// niri fires binds on PRESS only -- there is no on-release event in its config, so
+// true hold-to-talk is not possible through a keybind. These are toggles, which is
+// why utter enforces audio.max_duration_secs as a backstop.
+//
+// Prefer a single modifier. If you hold a multi-modifier chord while utter is typing,
+// the still-held modifier combines with every synthesised character and fires
+// compositor shortcuts instead of inserting text.
+
+binds {
+    Mod+D       { spawn "utter" "toggle"; }
+    Mod+Shift+D { spawn "utter" "cancel"; }
+}

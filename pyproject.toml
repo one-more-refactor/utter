@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "utter"
+version = "0.1.0"
+description = "Local push-to-talk dictation for Wayland, with an overlay, tray and sound cues"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+keywords = ["dictation", "speech-to-text", "wayland", "whisper", "parakeet", "niri"]
+classifiers = [
+  "Environment :: X11 Applications :: GTK",
+  "Intended Audience :: End Users/Desktop",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Multimedia :: Sound/Audio :: Speech",
+]
+
+# Deliberately no Python dependencies. PyGObject and dbus-python come from the
+# distribution (python-gobject, python-dbus), and everything else is a CLI tool.
+dependencies = []
+
+[project.scripts]
+utter = "utter.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/one-more-refactor/utter"
+Issues = "https://github.com/one-more-refactor/utter/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["utter"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
