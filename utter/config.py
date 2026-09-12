@@ -89,9 +89,12 @@ class TriggerConfig:
     """Global key trigger, read straight from evdev -- see hotkey.py."""
 
     enabled: bool = True
+    # "chord":      a modifier combination, e.g. Alt+Space. Cannot fire by accident
+    #               and types no character of its own.
     # "double_tap": tap the key twice to start, again to commit (or stop talking).
     # "hold":       hold the key to talk, release to commit -- classic push-to-talk.
-    mode: str = "double_tap"
+    mode: str = "chord"
+    modifiers: list[str] = field(default_factory=lambda: ["ALT"])
     # The key. Name from KEY_CODES, or a raw keycode.
     # For "hold", prefer a key that types nothing: SCROLLLOCK, PAUSE, F13, MENU.
     key: str = "SPACE"
@@ -103,7 +106,8 @@ class TriggerConfig:
     # an accidental brush from starting a dictation.
     hold_ms: int = 220
     # The trigger keys still reach the focused window (this is a passive read, not a
-    # grab), so two stray spaces get typed. Delete them before inserting the transcript.
+    # Only double-tap needs this: its two taps reach the focused window as spaces.
+    # A chord types nothing, so nothing has to be deleted.
     backspace: int = 2
     # Double-tap again while dictating to commit early.
     tap_to_commit: bool = True
@@ -134,7 +138,7 @@ class UiConfig:
     live_interval_ms: int = 700
     # Overlay position: "bottom", "top", "bottom-right", "top-right".
     position: str = "bottom"
-    margin: int = 90
+    margin: int = 22
     sound_volume: float = 0.25
 
 

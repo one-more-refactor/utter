@@ -1,16 +1,15 @@
 # utter
 
-Local dictation for Wayland. Double-tap space, talk, stop talking — the text appears
-in whatever you were typing into.
+Local dictation for Wayland. **Alt+Space**, talk, stop talking — the text appears in
+whatever you were typing into.
 
-The whole interface is a small pill with five dots that move when you speak. No panel,
-no transcript, no buttons.
+The whole interface is five dots at the bottom of the screen. They appear when you
+speak and vanish when you stop. No panel, no window, no buttons.
 
 Nothing leaves your machine. There is no account, no API key, and no subscription.
 
-**Double-tap space and start talking.** Words appear in the overlay as you speak, and
-when you stop talking it types the finished text for you. No key to release, no key to
-press again.
+**Alt+Space, then talk.** When you stop talking it types what you said. No key to
+release, no key to press again.
 
 ```
 utter daemon        # keeps the model resident, arms the trigger
@@ -38,15 +37,21 @@ because the network round-trip alone costs more than the inference:
 
 The default flow has no hotkey ceremony at all:
 
-1. **Double-tap space.** Read straight from the kernel's input devices, so it works in
-   any application without a compositor keybind.
-2. **Talk.** A small pill appears with five dots that rise and fall with your voice,
-   so you can see it is hearing you. It turns amber while transcribing. That is the
-   entire UI.
-3. **Stop talking.** After 1.5 s of silence it commits on its own, deletes the two
-   spaces the double-tap typed, and inserts the text.
+1. **Alt+Space.** Read straight from the kernel's input devices, so it works in any
+   application without a compositor keybind, and inserts no character of its own.
+2. **Talk.** Five dots at the bottom edge rise and fall with your voice, so you can
+   see it is hearing you, and fade out whenever you are quiet. They turn amber while
+   transcribing. That is the entire UI.
+3. **Stop talking.** After 1.5 s of silence it inserts the text on its own.
 
-Double-tap again mid-sentence to commit early. `utter cancel` throws the recording away.
+Alt+Space again to commit early. `utter cancel` throws the recording away.
+
+### Other triggers
+
+`mode = "double_tap"` taps one key twice — by default space. Double-spacing is
+something people genuinely type, so those taps are ignored if any other key was pressed
+in the previous 500 ms; pause briefly first and it opens. Its two spaces reach the
+window and are deleted afterwards.
 
 ### Or hold a key instead
 
@@ -67,16 +72,16 @@ over while held, at the compositor's autorepeat rate. Deleting those would mean
 guessing that rate, and guessing one too many eats your actual text — so utter does not
 try. It warns instead.
 
-| | double-tap | hold |
-|---|---|---|
-| best key | `SPACE` | `SCROLLLOCK`, `PAUSE`, `F13`, `MENU` |
-| how it ends | silence, or a second double-tap | you release the key |
-| stray characters | 2 spaces, deleted automatically | none, on an inert key |
-| `SPACE` in this mode | ideal | warned against — ~35 spaces per 2 s hold |
+| | chord (default) | double-tap | hold |
+|---|---|---|---|
+| example | `Alt+Space` | `SPACE` twice | `SCROLLLOCK` |
+| how it ends | silence, or the chord again | silence, or two more taps | you release |
+| stray characters | none | 2 spaces, deleted after | none, on an inert key |
+| fires by accident | no | only if you pause then double-space | no |
 
-Double-space is something people genuinely type, so the trigger ignores taps that
-happen while you are typing: if any other key was pressed in the previous 500 ms, the
-tap does not count. Pause for half a second, then double-tap, and it opens.
+On a German layout `ALT` means left Alt only: AltGr+Space inserts a non-breaking
+space, so binding it would type an invisible character every time. Ask for `ALTGR`
+explicitly if you want it anyway.
 
 Two details that make this possible rather than fiddly:
 
@@ -194,10 +199,9 @@ intensity = "light"                 # off | light | heavy
 vocabulary = ["Authentik", "Proxmox", "niri"]
 
 [trigger]
-enabled = true
-key = "SPACE"                       # or SCROLLLOCK, F13, CAPSLOCK, a raw keycode...
-double_tap_ms = 320
-backspace = 2
+modifiers = ["ALT"]                 # ALT | CTRL | SHIFT | SUPER | ALTGR
+key = "SPACE"
+# mode = "double_tap"               # or "hold"
 
 [audio]
 auto_stop = true

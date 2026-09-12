@@ -55,6 +55,26 @@ KEY_CODES = {
     "F16": 186,
     "INSERT": 110,
     "MENU": 127,
+    "LEFTMETA": 125,
+    "RIGHTMETA": 126,
+    "TAB": 15,
+    "ENTER": 28,
+    "BACKSLASH": 43,
+    "GRAVE": 41,
+}
+
+# A modifier name maps to the codes that satisfy it. ALT is deliberately LEFT only:
+# on a German layout AltGr (RIGHTALT) + space inserts a non-breaking space, so binding
+# it would type an invisible character every time you started dictating.
+MODIFIER_GROUPS = {
+    "ALT": (56,),
+    "LEFTALT": (56,),
+    "RIGHTALT": (100,),
+    "ALTGR": (100,),
+    "CTRL": (29, 97),
+    "SHIFT": (42, 54),
+    "SUPER": (125, 126),
+    "META": (125, 126),
 }
 
 _EVIOCGNAME = 0x80FF4506  # EVIOCGNAME(255)
@@ -132,6 +152,12 @@ class _Listener:
         self.error: str | None = None
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+    def _on_event(self, code: int, value: int) -> None:
+        if code == self.code:
+            self._on_key(value)
+        elif value == PRESS:
+            self._on_other_key()
 
     def _on_key(self, value: int) -> None:
         raise NotImplementedError
@@ -230,10 +256,7 @@ class _Listener:
             )
             if etype != EV_KEY:
                 continue
-            if code == self.code:
-                self._on_key(value)
-            elif value == PRESS:
-                self._on_other_key()
+            self._on_event(code, value)
         return None
 
 
@@ -335,3 +358,42 @@ class HoldListener(_Listener):
             self._timer.cancel()
             self._timer = None
         super().stop()
+
+
+class ChordListener(_Listener):
+    """Fires when `key` is pressed while every listed modifier is held.
+
+    A chord cannot be typed by accident the way a double-tap can, and it inserts no
+    character of its own, so there is nothing to clean up afterwards.
+    """
+
+    def __init__(
+        self,
+        key: str = "SPACE",
+        modifiers: tuple[str, ...] | list[str] = ("ALT",),
+        on_trigger: Callable[[], None] | None = None,
+    ) -> None:
+        super().__init__(key)
+        self.modifiers = [m.strip().upper() for m in modifiers]
+        self.groups = [MODIFIER_GROUPS.get(m, ()) for m in self.modifiers]
+        self.on_trigger = on_trigger
+        self._held: set[int] = set()
+
+    @property
+    def unknown_modifiers(self) -> list[str]:
+        return [m for m, g in zip(self.modifiers, self.groups) if not g]
+
+    def _on_event(self, code: int, value: int) -> None:
+        if value == PRESS:
+            self._held.add(code)
+        elif value == 0:
+            self._held.discard(code)
+        if code == self.code and value == PRESS and self._satisfied():
+            if self.on_trigger:
+                self.on_trigger()
+
+    def _satisfied(self) -> bool:
+        return all(any(c in self._held for c in group) for group in self.groups if group)
+
+    def describe(self) -> str:
+        return "+".join([*self.modifiers, self.key])

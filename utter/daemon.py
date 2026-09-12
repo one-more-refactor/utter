@@ -130,7 +130,21 @@ class Daemon:
         tc = self.cfg.trigger
         from .hotkey import DoubleTapListener, HoldListener, types_a_character
 
-        if tc.mode == "hold":
+        if tc.mode == "chord":
+            from .hotkey import ChordListener
+
+            self.listener = ChordListener(
+                key=tc.key,
+                modifiers=tc.modifiers,
+                on_trigger=lambda: GLib.idle_add(self._on_trigger),
+            )
+            unknown = self.listener.unknown_modifiers
+            if unknown:
+                print(f"utter: unknown modifier(s) {', '.join(unknown)} - trigger disabled")
+                self.listener = None
+                return
+            shape = self.listener.describe()
+        elif tc.mode == "hold":
             self.listener = HoldListener(
                 key=tc.key,
                 hold_ms=tc.hold_ms,
@@ -268,11 +282,14 @@ class Daemon:
         """Double-tap fired. Start dictating, or commit if already listening."""
         if self.state == RECORDING:
             if self.cfg.trigger.tap_to_commit:
-                # The two trigger keystrokes landed in the target window as well.
-                self._pending_backspace += self.cfg.trigger.backspace
+                if self.cfg.trigger.mode != "chord":
+                    # The two taps landed in the target window as spaces.
+                    self._pending_backspace += self.cfg.trigger.backspace
                 self.stop()
         elif self.state == IDLE:
-            self._pending_backspace = self.cfg.trigger.backspace
+            self._pending_backspace = (
+                0 if self.cfg.trigger.mode == "chord" else self.cfg.trigger.backspace
+            )
             self.start()
         return GLib.SOURCE_REMOVE
 

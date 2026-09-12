@@ -14,8 +14,9 @@ EXAMPLE_CONFIG = """# utter -- everything here is already the default.
 # Delete what you do not change.
 
 [trigger]
-key = "SPACE"          # double-tap it to dictate
-# mode = "hold"        # or hold a key instead -- then use an inert one:
+modifiers = ["ALT"]    # Alt+Space to start, Alt+Space again to insert
+key = "SPACE"
+# mode = "hold"        # or hold a key -- then use an inert one:
 # key = "SCROLLLOCK"   # SCROLLLOCK, PAUSE, F13, MENU
 
 [audio]
@@ -120,7 +121,7 @@ def _check(cfg: Config) -> int:
 
         code = resolve_key(cfg.trigger.key)
         found = keyboards(code) if code is not None else []
-        print(f"trigger      double-tap {cfg.trigger.key} "
+        print(f"trigger      {_trigger_desc(cfg)} "
               f"({len(found)} readable keyboard(s))")
         if not found:
             problems.append(
@@ -151,6 +152,15 @@ def _check(cfg: Config) -> int:
     return 0
 
 
+def _trigger_desc(cfg) -> str:
+    tc = cfg.trigger
+    if tc.mode == "chord":
+        return "+".join([*(m.upper() for m in tc.modifiers), tc.key])
+    if tc.mode == "hold":
+        return f"hold {tc.key}"
+    return f"double-tap {tc.key} within {tc.double_tap_ms} ms"
+
+
 def _keys(cfg, watch: bool = False) -> int:
     from .hotkey import DoubleTapListener, keyboards, resolve_key
 
@@ -159,8 +169,7 @@ def _keys(cfg, watch: bool = False) -> int:
         print(f"utter: unknown trigger key {cfg.trigger.key!r}")
         return 1
     devices = keyboards(code)
-    print(f"trigger      double-tap {cfg.trigger.key} (keycode {code}) "
-          f"within {cfg.trigger.double_tap_ms} ms")
+    print(f"trigger      {_trigger_desc(cfg)} (keycode {code})")
     if not devices:
         print("readable     none")
         print("\nproblem      no readable keyboard. Add yourself to the 'input' group:")
@@ -170,19 +179,29 @@ def _keys(cfg, watch: bool = False) -> int:
         print(f"readable     {path:22} {name}")
 
     if not watch:
-        print("\nrun `utter keys --watch` and double-tap to confirm it fires.")
+        print("\nrun `utter keys --watch` and press the trigger to confirm it fires.")
         return 0
 
     import time
 
     hits = []
-    listener = DoubleTapListener(
-        cfg.trigger.key, cfg.trigger.double_tap_ms, on_trigger=lambda: hits.append(time.time())
-    )
+    if cfg.trigger.mode == "chord":
+        from .hotkey import ChordListener
+
+        listener = ChordListener(
+            cfg.trigger.key, cfg.trigger.modifiers, on_trigger=lambda: hits.append(time.time())
+        )
+    else:
+        listener = DoubleTapListener(
+            cfg.trigger.key,
+            cfg.trigger.double_tap_ms,
+            cfg.trigger.guard_ms,
+            on_trigger=lambda: hits.append(time.time()),
+        )
     if not listener.start():
         print(f"utter: {listener.error}")
         return 1
-    print("\nwatching for 20 s -- double-tap now (Ctrl+C to stop)")
+    print(f"\nwatching for 20 s -- press {_trigger_desc(cfg)} now (Ctrl+C to stop)")
     seen = 0
     try:
         deadline = time.time() + 20
@@ -190,12 +209,12 @@ def _keys(cfg, watch: bool = False) -> int:
             time.sleep(0.1)
             while seen < len(hits):
                 seen += 1
-                print(f"  double-tap #{seen} detected")
+                print(f"  trigger #{seen} detected")
     except KeyboardInterrupt:
         pass
     finally:
         listener.stop()
-    print(f"\n{seen} double-tap(s) detected.")
+    print(f"\n{seen} trigger(s) detected.")
     return 0 if seen else 1
 
 
