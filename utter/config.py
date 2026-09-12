@@ -96,6 +96,9 @@ class TriggerConfig:
     # For "hold", prefer a key that types nothing: SCROLLLOCK, PAUSE, F13, MENU.
     key: str = "SPACE"
     double_tap_ms: int = 320
+    # Ignore taps that happen while you are actively typing: another key pressed within
+    # this window before the first tap cancels it.
+    guard_ms: int = 500
     # How long the key must be held before the microphone opens, in "hold" mode. Stops
     # an accidental brush from starting a dictation.
     hold_ms: int = 220
@@ -124,8 +127,9 @@ class UiConfig:
     overlay: bool = True
     tray: bool = True
     sounds: bool = True
-    # Show words in the overlay as you speak, by re-recognising the audio so far.
-    live_text: bool = True
+    # Re-recognise the audio so far while you speak. Off by default: the pill shows
+    # that it is listening, which is the part you actually need to see.
+    live_text: bool = False
     # How often to refresh that partial transcript.
     live_interval_ms: int = 700
     # Overlay position: "bottom", "top", "bottom-right", "top-right".

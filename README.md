@@ -1,9 +1,10 @@
 # utter
 
-Local push-to-talk dictation for Wayland. Double-tap space — or hold a key — talk, and
-the text appears in whatever you were typing into, with a live meter, the words
-arriving as you speak, a tray indicator, and sound cues so you know the microphone
-actually opened.
+Local dictation for Wayland. Double-tap space, talk, stop talking — the text appears
+in whatever you were typing into.
+
+The whole interface is a small pill with five dots that move when you speak. No panel,
+no transcript, no buttons.
 
 Nothing leaves your machine. There is no account, no API key, and no subscription.
 
@@ -39,9 +40,9 @@ The default flow has no hotkey ceremony at all:
 
 1. **Double-tap space.** Read straight from the kernel's input devices, so it works in
    any application without a compositor keybind.
-2. **Talk.** A panel shows a live level meter and the transcript so far, refreshed
-   every 700 ms by re-recognising the audio captured up to that point. Cheap, because
-   the model is resident — a full 11 s utterance costs ~200 ms.
+2. **Talk.** A small pill appears with five dots that rise and fall with your voice,
+   so you can see it is hearing you. It turns amber while transcribing. That is the
+   entire UI.
 3. **Stop talking.** After 1.5 s of silence it commits on its own, deletes the two
    spaces the double-tap typed, and inserts the text.
 
@@ -73,9 +74,9 @@ try. It warns instead.
 | stray characters | 2 spaces, deleted automatically | none, on an inert key |
 | `SPACE` in this mode | ideal | warned against — ~35 spaces per 2 s hold |
 
-Observed end to end, speaking an 11 s sentence: partials at `and` → `And so my` →
-`And so, my fellow Americans,` → … and a final commit 196 ms after silence was
-detected.
+Double-space is something people genuinely type, so the trigger ignores taps that
+happen while you are typing: if any other key was pressed in the previous 500 ms, the
+tap does not count. Pause for half a second, then double-tap, and it opens.
 
 Two details that make this possible rather than fiddly:
 
@@ -103,7 +104,6 @@ whisper.cpp 1.9.3, `large-v3-turbo` q8:
 | same model, CPU only (16 threads) | 4.39 s |
 | Parakeet 0.6B via `parakeet-cli` | 691–1068 ms (reloads the model each time) |
 | optional LLM cleanup pass, warm | 482–924 ms |
-| live partial refresh, while speaking | ~200 ms per pass, every 700 ms |
 
 GPU returns to idle clocks with VRAM released between utterances.
 
@@ -208,8 +208,11 @@ silence_level = 0.02
 overlay = true
 tray = true
 sounds = true
-live_text = true
 ```
+
+`live_text = true` additionally re-recognises the audio while you speak. It works, and
+it is off by default: watching words rewrite themselves is more distracting than the
+dots, and it costs a recognition pass every 700 ms.
 
 ## The optional cleanup pass
 
@@ -285,9 +288,8 @@ Things that are the way they are on purpose:
   readable, but a uinput device cannot be used to test it end-to-end (uinput nodes get
   no seat ACL), so the final link — a human actually tapping space twice — is verified
   by `utter keys --watch` rather than automatically.
-- Live partials re-recognise the whole utterance each pass. That is fine at
-  conversational lengths and wasteful for very long ones; `live_text = false` turns it
-  off.
+- `live_text` re-recognises the whole utterance on each pass. Fine at conversational
+  lengths, wasteful for very long ones. Off by default.
 
 ## License
 

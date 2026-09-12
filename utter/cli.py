@@ -10,51 +10,27 @@ from pathlib import Path
 
 from .config import CONFIG_PATH, Config, socket_path
 
-EXAMPLE_CONFIG = """# utter configuration
-# Every value here is a default -- delete what you do not need to change.
-
-[audio]
-source = "default"            # never point this at a *.monitor node
-max_duration_secs = 60.0      # hard stop, so a missed stop cannot run for minutes
-auto_stop = true              # commit when you stop talking
-silence_ms = 1500             # how long a pause must last to count as "done"
-silence_level = 0.02          # peak level below which audio counts as silence
+EXAMPLE_CONFIG = """# utter -- everything here is already the default.
+# Delete what you do not change.
 
 [trigger]
-enabled = true                # double-tap to dictate, read straight from evdev
-key = "SPACE"
-double_tap_ms = 320
-backspace = 2                 # delete the two spaces the trigger itself types
+key = "SPACE"          # double-tap it to dictate
+# mode = "hold"        # or hold a key instead -- then use an inert one:
+# key = "SCROLLLOCK"   # SCROLLLOCK, PAUSE, F13, MENU
+
+[audio]
+silence_ms = 1500      # pause this long and it inserts what you said
 
 [asr]
-backend = "whisper-server"    # resident, ~220 ms/utterance
-model = "~/ai/stt/ggml-large-v3-turbo-q8_0.bin"
-# backend = "parakeet-cli"    # more accurate English, ~700 ms (reloads every time)
-parakeet_model = "~/ai/stt/ggml-parakeet-v3-q8.bin"
 language = "en"
+model = "~/ai/stt/ggml-large-v3-turbo-q8_0.bin"
 
 [output]
-mode = "type"                 # or "clipboard"
-type_delay_ms = 2             # 0 drops characters on some compositors
-two_stage = true              # type raw immediately, replace once cleanup returns
-
-[output.replacements]
-# Deterministic fixes, applied before the LLM sees anything.
-# "see three do" = "cr3do"
-
-[cleanup]
-enabled = false               # set true once plain dictation feels good
-model = "huihui_ai/gemma-4-abliterated:e4b"
-intensity = "light"           # off | light | heavy
-vocabulary = []               # ["Authentik", "Proxmox", "niri"]
+mode = "type"          # or "clipboard"
 
 [ui]
-overlay = true
-tray = true
 sounds = true
-live_text = true              # show words in the overlay as you speak
-live_interval_ms = 700
-position = "bottom"           # bottom | top | bottom-right | top-right
+position = "bottom"    # bottom | top | bottom-right | top-right
 """
 
 

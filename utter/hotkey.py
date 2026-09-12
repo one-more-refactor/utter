@@ -136,6 +136,10 @@ class _Listener:
     def _on_key(self, value: int) -> None:
         raise NotImplementedError
 
+    def _on_other_key(self) -> None:
+        """Any key other than the trigger was pressed."""
+        return None
+
     def available(self) -> bool:
         if self.code is None:
             self.error = "unknown trigger key"
@@ -224,9 +228,12 @@ class _Listener:
             _sec, _usec, etype, code, value = struct.unpack_from(
                 EVENT_FORMAT, data, offset
             )
-            if etype != EV_KEY or code != self.code:
+            if etype != EV_KEY:
                 continue
-            self._on_key(value)
+            if code == self.code:
+                self._on_key(value)
+            elif value == PRESS:
+                self._on_other_key()
         return None
 
 
@@ -240,12 +247,23 @@ class DoubleTapListener(_Listener):
         self,
         key: str = "SPACE",
         window_ms: int = 320,
+        guard_ms: int = 500,
         on_trigger: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(key)
         self.window = window_ms / 1000.0
+        # Double-spacing is something people genuinely type. Requiring a quiet moment
+        # before the first tap is what separates "I want to dictate" from "I am in the
+        # middle of a sentence" -- while typing, some other key was pressed moments ago;
+        # when reaching for dictation, your hands have paused.
+        self.guard = guard_ms / 1000.0
         self.on_trigger = on_trigger
         self._last_press = 0.0
+        self._last_other = 0.0
+
+    def _on_other_key(self) -> None:
+        self._last_other = time.monotonic()
+        self._last_press = 0.0  # a key in between means this was typing, not a tap
 
     def _on_key(self, value: int) -> None:
         if value != PRESS:
@@ -255,8 +273,9 @@ class DoubleTapListener(_Listener):
             self._last_press = 0.0  # consumed: a third tap starts over
             if self.on_trigger:
                 self.on_trigger()
-        else:
-            self._last_press = now
+            return
+        # Only let a tap open a sequence if it was not part of active typing.
+        self._last_press = now if (now - self._last_other) >= self.guard else 0.0
 
 
 class HoldListener(_Listener):

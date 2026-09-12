@@ -142,6 +142,7 @@ class Daemon:
             self.listener = DoubleTapListener(
                 key=tc.key,
                 window_ms=tc.double_tap_ms,
+                guard_ms=tc.guard_ms,
                 on_trigger=lambda: GLib.idle_add(self._on_trigger),
             )
             shape = f"double-tap {tc.key} (within {tc.double_tap_ms} ms)"
