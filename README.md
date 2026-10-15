@@ -1,7 +1,14 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/brand/mark-dark.svg">
+  <img src=".github/brand/mark-light.svg" alt="" width="32" height="32">
+</picture>
+
 # utter
 
 Local dictation for Wayland that **types while you speak**. Hold a key, talk, and the
 words appear in whatever you were typing into, a beat behind your voice.
+
+<img src=".github/brand/kind-tool.svg" alt="kind: tool" height="20">&nbsp;<img src=".github/brand/status-live.svg" alt="status: live" height="20">
 
 There is no window, no panel, no overlay. The text arriving *is* the interface.
 
@@ -347,3 +354,13 @@ What that means for you in practice:
 
 Review it like you would review code from a stranger who is very fast, very literal,
 and occasionally confident about things it has not checked.
+
+---
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/brand/lockup-dark.svg">
+  <img src=".github/brand/lockup-light.svg" alt="one more" height="20">
+</picture>
+
+part of [one more](https://github.com/one-more-refactor) — small tools that
+keep their data in plain files and never ask you to make an account.
