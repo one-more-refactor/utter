@@ -119,7 +119,18 @@ def live_clean(text: str) -> str:
     out = _FILLERS.sub("", text)
     out = _REPEAT.sub(r"\1", out)
     out = re.sub(r"\s{2,}", " ", out)
+    # "Um, so I think" loses its capitalised first word; the sentence still starts here.
+    first_in, first_out = _first_alpha(text), _first_alpha(out)
+    if first_in is not None and first_out is not None and text[first_in].isupper():
+        out = out[:first_out] + out[first_out].upper() + out[first_out + 1 :]
     return out
+
+
+def _first_alpha(text: str) -> int | None:
+    for i, ch in enumerate(text):
+        if ch.isalpha():
+            return i
+    return None
 
 
 def apply_replacements(text: str, replacements: dict[str, str]) -> str:
