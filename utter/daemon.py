@@ -1,5 +1,9 @@
 """The daemon: owns the model, the microphone, the tray, and the state machine.
 
+The GLib main loop is the only thread that changes state or types text. Capture,
+recognition and the cleanup pass run on worker threads and hand results back through
+`GLib.idle_add`.
+
 Why a daemon at all: loading the model is the single largest cost in naive dictation
 scripts -- 243 ms of the 486 ms a one-shot whisper-cli run takes. Keeping it resident
 is what gets an utterance down to ~200 ms.
@@ -349,7 +353,7 @@ class Daemon:
         return GLib.SOURCE_REMOVE
 
     def _note_level(self, level: float) -> None:
-        # Read by the GTK tick; never touch widgets off-thread.
+        # Called from the capture thread; only plain attribute writes here.
         self._level = level
         # Keep a short history so silence detection looks at a window rather than one
         # 64 ms chunk. Consonants and breaths dip low constantly; an utterance has not
@@ -449,6 +453,10 @@ class Daemon:
         text = text_mod.apply_replacements(text, self.cfg.output.replacements)
         if not text.strip():
             return
+        # The trigger's own keystrokes (a double-tap's two spaces) sit right before
+        # the caret. Delete them before the first word lands on top of them -- after
+        # that, backspacing would eat dictated text instead.
+        self._consume_backspace()
         try:
             inject.type_text(text, self.cfg.output.type_delay_ms)
         except inject.InjectError as exc:
@@ -489,6 +497,11 @@ class Daemon:
             self.recorder.stop()
             self.recorder = None
             self.log("cancelled")
+        # Words already typed while streaming stay where they are (append-only), but
+        # the trigger's stray spaces should not.
+        self._consume_backspace()
+        if self._streaming:
+            self.stream.reset()
         self._reset()
         return GLib.SOURCE_REMOVE
 
@@ -526,6 +539,8 @@ class Daemon:
             tail = self.stream.finish(body)
             if tail:
                 self._emit(tail)
+            # Nothing typed after the commit tap: its spaces are still at the caret.
+            self._consume_backspace()
             typed = self.stream.typed
             self.stream.reset()
             if typed:
@@ -646,7 +661,3 @@ def send(cmd: str, timeout: float = 5.0) -> str:
         sock.sendall(cmd.encode())
         return sock.recv(65536).decode("utf-8", "replace").strip()
 
-
-def ensure_gtk_init() -> None:
-    """Nothing to initialise: there is no GUI, only a GLib main loop."""
-    return None
