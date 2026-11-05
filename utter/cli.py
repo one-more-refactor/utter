@@ -8,7 +8,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .config import CONFIG_PATH, Config, socket_path
+from . import __version__
+from .config import CONFIG_PATH, Config, ConfigError, socket_path
 
 EXAMPLE_CONFIG = """# utter -- everything here is already the default.
 # Delete anything you do not change.
@@ -47,6 +48,7 @@ def main(argv: list[str] | None = None) -> int:
         description="Local push-to-talk dictation for Wayland.",
     )
     parser.add_argument("-c", "--config", type=Path, help="path to config.toml")
+    parser.add_argument("-V", "--version", action="version", version=f"utter {__version__}")
     sub = parser.add_subparsers(dest="cmd")
 
     run = sub.add_parser("daemon", help="run the dictation daemon")
@@ -62,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("init", help="write an example config file")
     sub.add_parser("sources", help="list usable microphone sources")
     k = sub.add_parser("keys", help="show which keyboards the trigger can read")
-    k.add_argument("--watch", action="store_true", help="print each double-tap as it fires")
+    k.add_argument("--watch", action="store_true", help="print each trigger as it fires")
 
     args = parser.parse_args(argv)
     cmd = args.cmd or "daemon"
@@ -70,7 +72,13 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "init":
         return _init_config(args.config)
 
-    cfg = Config.load(args.config)
+    try:
+        cfg = Config.load(args.config)
+    except ConfigError as exc:
+        print(f"utter: invalid config: {exc}", file=sys.stderr)
+        return 2
+    if cfg.unknown and cmd in ("daemon", "check"):
+        print(f"utter: ignoring unknown config key(s): {', '.join(cfg.unknown)}", file=sys.stderr)
 
     if cmd == "check":
         return _check(cfg)
@@ -82,9 +90,13 @@ def main(argv: list[str] | None = None) -> int:
         return _keys(cfg, watch=getattr(args, "watch", False))
 
     if cmd == "daemon":
-        from .daemon import Daemon, ensure_gtk_init
+        problems = cfg.validate()
+        if problems:
+            for p in problems:
+                print(f"utter: {p}", file=sys.stderr)
+            return 1
+        from .daemon import Daemon
 
-        ensure_gtk_init()
         return Daemon(cfg, verbose=getattr(args, "verbose", False)).run()
 
     from .daemon import send
@@ -113,6 +125,11 @@ def _init_config(path: Path | None) -> int:
 
 def _check(cfg: Config) -> int:
     problems = cfg.check()
+    if any(" should be " in p for p in problems):
+        # Wrong types make the summary below meaningless; report and stop.
+        for p in problems:
+            print(f"problem      {p}")
+        return 1
     print(f"backend      {cfg.asr.backend}")
     print(f"model        {Path(cfg.resolved_model()).expanduser()}")
     print(f"output       {cfg.output.mode} (wtype delay {cfg.output.type_delay_ms} ms)")
@@ -159,12 +176,12 @@ def _trigger_desc(cfg) -> str:
     if tc.mode == "chord":
         return "+".join([*(m.upper() for m in tc.modifiers), tc.key])
     if tc.mode == "hold":
-        return f"hold {tc.key}"
+        return f"hold {tc.key} for {tc.hold_ms} ms"
     return f"double-tap {tc.key} within {tc.double_tap_ms} ms"
 
 
 def _keys(cfg, watch: bool = False) -> int:
-    from .hotkey import DoubleTapListener, keyboards, resolve_key
+    from .hotkey import DoubleTapListener, HoldListener, keyboards, resolve_key
 
     code = resolve_key(cfg.trigger.key)
     if code is None:
@@ -193,6 +210,13 @@ def _keys(cfg, watch: bool = False) -> int:
         listener = ChordListener(
             cfg.trigger.key, cfg.trigger.modifiers, on_trigger=lambda: hits.append(time.time())
         )
+    elif cfg.trigger.mode == "hold":
+        # A hold counts once the key has been down long enough to open the mic.
+        listener = HoldListener(
+            cfg.trigger.key,
+            cfg.trigger.hold_ms,
+            on_press=lambda: hits.append(time.time()),
+        )
     else:
         listener = DoubleTapListener(
             cfg.trigger.key,
@@ -203,7 +227,7 @@ def _keys(cfg, watch: bool = False) -> int:
     if not listener.start():
         print(f"utter: {listener.error}")
         return 1
-    print(f"\nwatching for 20 s -- press {_trigger_desc(cfg)} now (Ctrl+C to stop)")
+    print(f"\nwatching for 20 s -- try {_trigger_desc(cfg)} now (Ctrl+C to stop)")
     seen = 0
     try:
         deadline = time.time() + 20

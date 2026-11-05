@@ -106,8 +106,8 @@ class TriggerConfig:
     # an accidental brush from starting a dictation.
     hold_ms: int = 220
     # The trigger keys still reach the focused window (this is a passive read, not a
-    # Only double-tap needs this: its two taps reach the focused window as spaces.
-    # A chord types nothing, so nothing has to be deleted.
+    # grab), so a double-tap's two taps land there as spaces and are deleted again.
+    # A chord or an inert hold key types nothing, so nothing has to be deleted.
     backspace: int = 2
     # Double-tap again while dictating to commit early.
     tap_to_commit: bool = True
@@ -162,44 +162,110 @@ class Config:
     output: OutputConfig = field(default_factory=OutputConfig)
     ui: UiConfig = field(default_factory=UiConfig)
 
+    def __post_init__(self) -> None:
+        # Keys in the file that utter does not know. Reported, never fatal: a config
+        # written for an older or newer version should still start.
+        self.unknown: list[str] = []
+
     @classmethod
     def load(cls, path: Path | None = None) -> "Config":
+        """Read `path` (default ~/.config/utter/config.toml) over the defaults.
+
+        Raises ConfigError with a readable message when the file is not valid TOML.
+        """
         path = path or CONFIG_PATH
         raw: dict = {}
         if path.exists():
-            with path.open("rb") as fh:
-                raw = tomllib.load(fh)
+            try:
+                with path.open("rb") as fh:
+                    raw = tomllib.load(fh)
+            except tomllib.TOMLDecodeError as exc:
+                raise ConfigError(f"{path}: {exc}") from exc
         cfg = cls()
-        for f in fields(cls):
-            section = raw.get(f.name)
-            if not isinstance(section, dict):
+        sections = {f.name for f in fields(cls)}
+        for name, section in raw.items():
+            if name not in sections:
+                cfg.unknown.append(f"[{name}]")
                 continue
-            target = getattr(cfg, f.name)
+            if not isinstance(section, dict):
+                cfg.unknown.append(name)
+                continue
+            target = getattr(cfg, name)
             known = {sf.name for sf in fields(target)}
             for key, value in section.items():
                 if key in known:
                     setattr(target, key, value)
+                else:
+                    cfg.unknown.append(f"{name}.{key}")
         return cfg
 
     def resolved_model(self) -> str:
         return self.asr.parakeet_model if self.asr.backend == "parakeet-cli" else self.asr.model
 
+    def validate(self) -> list[str]:
+        """Problems with the values themselves -- wrong types, unknown choices.
+
+        Pure: touches neither the filesystem nor PATH, so it is cheap to test.
+        """
+        problems: list[str] = []
+        for section in fields(self):
+            target = getattr(self, section.name)
+            defaults = type(target)()
+            for f in fields(target):
+                value, default = getattr(target, f.name), getattr(defaults, f.name)
+                if not _same_kind(value, default):
+                    problems.append(
+                        f"{section.name}.{f.name} should be {_kind(default)}, got {value!r}"
+                    )
+        if problems:
+            return problems  # the checks below assume the types are right
+
+        for where, value, allowed in (
+            ("trigger.mode", self.trigger.mode, TRIGGER_MODES),
+            ("output.mode", self.output.mode, OUTPUT_MODES),
+            ("cleanup.intensity", self.cleanup.intensity, CLEANUP_INTENSITIES),
+            ("asr.backend", self.asr.backend, ASR_BACKENDS),
+        ):
+            if value not in allowed:
+                choices = ", ".join(repr(a) for a in allowed)
+                problems.append(f"{where} = {value!r} is not one of {choices}")
+
+        if self.trigger.enabled:
+            from .hotkey import MODIFIER_GROUPS, resolve_key
+
+            if resolve_key(self.trigger.key) is None:
+                problems.append(
+                    f"trigger.key = {self.trigger.key!r} is not a known key name "
+                    "(use a name like RIGHTCTRL or SCROLLLOCK, or a raw keycode)"
+                )
+            if self.trigger.mode == "chord":
+                bad = [m for m in self.trigger.modifiers if m.strip().upper() not in MODIFIER_GROUPS]
+                if bad:
+                    problems.append(f"trigger.modifiers: unknown modifier(s) {', '.join(bad)}")
+
+        if not 0.0 <= self.audio.silence_level <= 1.0:
+            problems.append("audio.silence_level must be between 0.0 and 1.0")
+        if self.audio.max_duration_secs <= 0:
+            problems.append("audio.max_duration_secs must be positive")
+        if self.stream.interval_ms < 50:
+            problems.append("stream.interval_ms below 50 would recognise continuously")
+        return problems
+
     def check(self) -> list[str]:
         """Return human-readable problems. Empty list means good to go."""
-        problems: list[str] = []
+        problems: list[str] = self.validate()
+        if any(p.startswith("asr.backend") for p in problems):
+            return problems
 
         model = Path(self.resolved_model()).expanduser()
         if not model.exists():
             problems.append(f"model not found: {model}")
 
-        if self.asr.backend == "whisper-server":
-            binary = self.asr.whisper_server_bin
-        elif self.asr.backend == "parakeet-cli":
+        if self.asr.backend == "parakeet-cli":
             binary = self.asr.parakeet_cli_bin
         else:
-            problems.append(f"unknown asr.backend: {self.asr.backend!r}")
-            binary = None
-        if binary and not (Path(binary).is_file() or shutil.which(binary)):
+            binary = self.asr.whisper_server_bin
+        if not (Path(binary).is_file() or shutil.which(binary)):
             problems.append(f"{binary} not on PATH (pacman -S whisper-cpp ggml-vulkan)")
 
         if not shutil.which("pw-record"):
@@ -211,3 +277,39 @@ class Config:
             problems.append("wl-copy not found (pacman -S wl-clipboard)")
 
         return problems
+
+
+class ConfigError(ValueError):
+    """The config file could not be read."""
+
+
+TRIGGER_MODES = ("hold", "chord", "double_tap")
+OUTPUT_MODES = ("type", "clipboard")
+CLEANUP_INTENSITIES = ("off", "light", "heavy")
+ASR_BACKENDS = ("whisper-server", "parakeet-cli")
+
+
+def _same_kind(value: object, default: object) -> bool:
+    """Whether a value read from TOML has the same shape as the field's default."""
+    if isinstance(default, bool) or isinstance(value, bool):
+        return type(value) is type(default)
+    if isinstance(default, float):
+        return isinstance(value, (int, float))
+    if isinstance(default, list):
+        return isinstance(value, list) and all(isinstance(v, str) for v in value)
+    if isinstance(default, dict):
+        return isinstance(value, dict) and all(
+            isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+        )
+    return isinstance(value, type(default))
+
+
+def _kind(default: object) -> str:
+    return {
+        bool: "true or false",
+        int: "a whole number",
+        float: "a number",
+        str: "a string",
+        list: "a list of strings",
+        dict: "a table of strings",
+    }.get(type(default), type(default).__name__)
