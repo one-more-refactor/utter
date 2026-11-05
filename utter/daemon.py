@@ -497,9 +497,7 @@ class Daemon:
             self.recorder.stop()
             self.recorder = None
             self.log("cancelled")
-        # Words already typed while streaming stay where they are (append-only), but
-        # the trigger's stray spaces should not.
-        self._consume_backspace()
+        # Words already typed while streaming stay where they are (append-only).
         if self._streaming:
             self.stream.reset()
         self._reset()
@@ -634,6 +632,9 @@ class Daemon:
         return GLib.SOURCE_REMOVE
 
     def _reset(self) -> None:
+        """Back to idle without typing anything: cancelled, too short, or silence."""
+        # The trigger's own keystrokes (a double-tap's spaces) should not outlive it.
+        self._consume_backspace()
         if self.tray:
             self.tray.set_state("idle")
         self.state = IDLE
