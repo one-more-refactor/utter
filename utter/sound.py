@@ -5,7 +5,7 @@ repo stays text-only. Two short tones: rising when capture opens, falling when i
 closes. A muted thud when something went wrong.
 
 Cues matter more than they look: with push-to-talk you need to know capture opened
-*before* you start speaking, and the overlay is often not where you are looking.
+*before* you start speaking, and there is no on-screen indicator to look at.
 """
 
 from __future__ import annotations

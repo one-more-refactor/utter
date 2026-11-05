@@ -5,13 +5,14 @@ build-backend = "hatchling.build"
 [project]
 name = "utter"
 version = "0.2.0"
-description = "Local push-to-talk dictation for Wayland, with an overlay, tray and sound cues"
+description = "Local push-to-talk dictation for Wayland that types while you speak"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 keywords = ["dictation", "speech-to-text", "wayland", "whisper", "parakeet", "niri"]
 classifiers = [
-  "Environment :: X11 Applications :: GTK",
+  "Environment :: No Input/Output (Daemon)",
+  "Operating System :: POSIX :: Linux",
   "Intended Audience :: End Users/Desktop",
   "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",

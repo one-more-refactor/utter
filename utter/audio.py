@@ -1,7 +1,7 @@
 """Microphone capture via pw-record, with live level metering.
 
 One `pw-record` process streams raw s16 mono to stdout. We read it in small chunks so
-the overlay can show a live meter, and accumulate the same bytes for the WAV we hand
+silence detection can watch the level live, and accumulate the same bytes for the WAV we hand
 to the recogniser. One capture, two consumers, no second process.
 """
 
